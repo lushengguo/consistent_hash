@@ -1,22 +1,78 @@
+use consistent_hash::consistent_hash::find_next_3_node;
+// use kv_service::pb::key_value_service_client::KeyValueServiceClient;
+use consistent_hash::RequestType;
+use consistent_hash::gossip::ServerInfo;
 use consistent_hash::pb::{
     key_value_service_client::KeyValueServiceClient,
     service_discovery_client::ServiceDiscoveryClient,
-    KeyValue, Key, GetServerRequest,
 };
 use std::env;
 use tonic::Request;
 
-async fn get_responsible_server(proxy_addr: &str, key: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let mut client = ServiceDiscoveryClient::connect(format!("http://{}", proxy_addr)).await?;
-    
-    let request = Request::new(GetServerRequest {
-        key: key.to_string(),
-    });
-    
-    let response = client.get_server(request).await?;
-    let server_info = response.into_inner().server.ok_or("No server found")?;
-    
-    Ok(server_info.address)
+// #[tonic::async_trait]
+// impl
+
+// async fn get_responsible_server(proxy_address: &str, key: &str) -> Result<String, Box<dyn std::error::Error>> {
+//     let mut client = ServiceDiscoveryClient::connect(format!("http://{}", proxy_address)).await?;
+
+//     let request = Request::new(GetServerRequest {
+//         key: key.to_string(),
+//     });
+
+//     let response = client.get_server(request).await?;
+//     let server_info = response.into_inner().server.ok_or("No server found")?;
+
+//     Ok(server_info.address)
+// }
+
+async fn run_quorum_based_request(
+    server_info: &Vec<ServerInfo>,
+    key: &String,
+    value: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut success_count = 0;
+    let nodes = find_next_3_node(server_info, key);
+    for node in nodes {
+        let mut client = KeyValueServiceClient::connect(format!("http://{}", node)).await?;
+        let request = match value {
+            Some(v) => client.create(key.clone(), v).await,
+            None => client.read(key.clone()).await,
+        };
+        match request {
+            Ok(response) => {
+                success_count += 1;
+                println!("Response from {}: {:?}", node, response);
+            }
+            Err(e) => {
+                eprintln!("Error from {}: {:?}", node, e);
+            }
+        }
+    }
+    if success_count < 2 {
+        eprintln!("Quorum not reached. Only {} out of 3 nodes responded successfully.", success_count);
+        return Err("Quorum not reached".into());
+    }
+    println!("Quorum reached with {} successful responses.", success_count);
+    return Ok(());
+}
+
+async fn query_server_info(
+    proxy_address: &String,
+) -> Result<Vec<ServerInfo>, Box<dyn std::error::Error>> {
+    let mut client = KeyValueServiceClient::connect(format!("http://{}", proxy_address)).await?;
+    let server_info = client.get_server_info().await?;
+    Ok(server_info)
+}
+
+async fn request(
+    request_type: &RequestType,
+    proxy_address: &String,
+    key: &String,
+    value: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let server_info = query_server_info(proxy_address).await?;
+    run_quorum_based_request(&server_info, key, value).await?;
+    Ok(())
 }
 
 #[tokio::main]
@@ -24,79 +80,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 4 {
         eprintln!("Usage: client <proxy_address> <operation> <key> [value]");
-        eprintln!("Operations: create, read, update, delete");
+        eprintln!("Operations: create(c), read(r), update(u), delete(d)");
         eprintln!("Example: client 127.0.0.1:50051 create mykey myvalue");
         return Ok(());
     }
-    
-    let proxy_addr = &args[1];
+
+    let proxy_address = &args[1];
     let operation = &args[2];
     let key = &args[3];
     let value = args.get(4).cloned().unwrap_or_default();
-    
-    println!("使用代理 {} 执行 {} 操作，键: {}, 值: {}", proxy_addr, operation, key, value);
-    
-    // 通过代理获取负责该键的服务器地址
-    let server_addr = match get_responsible_server(proxy_addr, key).await {
-        Ok(addr) => addr,
-        Err(e) => {
-            eprintln!("获取服务器地址失败: {:?}", e);
-            return Err(e);
+
+    let request_type = match operation.as_str() {
+        "create" | "c" => RequestType::Create,
+        "read" | "r" => RequestType::Read,
+        "update" | "u" => RequestType::Update,
+        "delete" | "d" => RequestType::Delete,
+        _ => {
+            eprintln!("Invalid operation: {}", operation);
+            return Ok(());
         }
     };
-    
-    println!("键 {} 由服务器 {} 负责", key, server_addr);
-    
-    // 连接到负责该键的服务器
-    let mut client = KeyValueServiceClient::connect(format!("http://{}", server_addr)).await?;
-    
-    match operation.to_lowercase().as_str() {
-        "create" => {
-            let request = Request::new(KeyValue {
-                key: key.to_string(),
-                value: value.to_string(),
-            });
-            
-            let response = client.create(request).await?;
-            println!("创建响应: {:?}", response);
-        }
-        "read" => {
-            let request = Request::new(Key {
-                key: key.to_string(),
-            });
-            
-            match client.read(request).await {
-                Ok(response) => {
-                    let kv = response.into_inner();
-                    println!("键: {}, 值: {}", kv.key, kv.value);
-                }
-                Err(status) => {
-                    eprintln!("读取失败: {}", status);
-                }
-            }
-        }
-        "update" => {
-            let request = Request::new(KeyValue {
-                key: key.to_string(),
-                value: value.to_string(),
-            });
-            
-            let response = client.update(request).await?;
-            println!("更新响应: {:?}", response);
-        }
-        "delete" => {
-            let request = Request::new(Key {
-                key: key.to_string(),
-            });
-            
-            let response = client.delete(request).await?;
-            println!("删除响应: {:?}", response);
-        }
-        _ => {
-            eprintln!("不支持的操作: {}", operation);
-            eprintln!("支持的操作: create, read, update, delete");
-        }
-    }
-    
+
+    request(&request_type, proxy_address, key, Some(value)).await?;
+
     Ok(())
 }

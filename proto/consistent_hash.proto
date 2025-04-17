@@ -1,14 +1,12 @@
 syntax = "proto3";
 package consistent_hash;
 
+import "google/protobuf/empty.proto";
+
 message ServerInfo {
     string server_id = 1;
     string address = 2;  
     int32 weight = 3;    
-}
-
-message ServerList {
-    repeated ServerInfo servers = 1;
 }
 
 message RegisterRequest {
@@ -29,19 +27,92 @@ message DeregisterResponse {
     string message = 2;
 }
 
-message GetServerRequest {
-    string key = 1;  
-}
-
-message GetServerResponse {
-    ServerInfo server = 1;
-}
-
 message GetAllServersRequest {}
 
 service ServiceDiscovery {
     rpc Register(RegisterRequest) returns (RegisterResponse);
     rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
-    rpc GetServer(GetServerRequest) returns (GetServerResponse);
-    rpc GetAllServers(GetAllServersRequest) returns (ServerList);
+}
+
+enum ResultCode{
+    SUCCESS = 0;
+    KEY_NOT_EXIST = 1;
+}
+
+message GetValueRequest {
+    string key = 1;
+}
+
+message GetValueResponse {
+    string value = 1;
+    ResultCode result_code = 2;
+}
+
+message SetKVRequest {
+    string key = 1;
+    string value = 2;
+}
+
+message SetKVResponse {
+    ResultCode result_code = 1;
+}
+
+message DeleteKeyRequest {
+    string key = 1;
+}
+
+message DeleteKeyResponse {
+    ResultCode result_code = 1;
+}
+
+message ServiceRecord {
+    string server_id = 1;
+    string address = 2;
+    uint64 hearbeat_timestamp = 3;
+    repeated string vnode = 4;
+    string is_slave_of = 5;
+}
+
+message Gossip {
+    // status of orther server
+    repeated ServiceRecord service_record = 1;
+}
+
+service ConsistentHashServer {
+    rpc GetValue(GetValueRequest) returns (GetValueResponse);
+    rpc SetKV(SetKVRequest) returns (SetKVResponse);
+    rpc DeleteKey(DeleteKeyRequest) returns (DeleteKeyResponse);
+
+    rpc ListenGossip(Gossip) returns (Gossip);
+}
+
+message RedirectGossipMessageRequest {
+    Gossip gossip = 1;
+    string server_id = 2;
+}
+
+message RedirectGossipMessageResponse {
+    ResultCode result_code = 1;
+}
+
+message RedirectCloneKeyMessageRequest {
+    string key = 1;
+    string value = 2;
+    string server_id = 3;
+}
+
+message RedirectCloneKeyMessageResponse {
+    ResultCode result_code = 1;
+}
+
+service ProxyService {
+    // those three apis are for client usage
+    rpc GetValue(GetValueRequest) returns (GetValueResponse);
+    rpc SetKV(SetKVRequest) returns (SetKVResponse);
+    rpc DeleteKey(DeleteKeyRequest) returns (DeleteKeyResponse);
+
+    // redirect all kinds of message
+    // which could create the network partition manually
+    rpc RedirectGossipMessage(RedirectGossipMessageRequest) returns (RedirectGossipMessageResponse);
+    rpc GetAllServerInfo(google.protobuf.Empty) returns (Gossip);
 }

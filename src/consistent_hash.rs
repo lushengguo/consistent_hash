@@ -3,6 +3,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::gossip::ServerInfo;
+
 #[derive(Debug, Clone)]
 pub struct ConsistentHash {
     ring: Arc<RwLock<BTreeMap<u64, String>>>,
@@ -54,14 +56,14 @@ impl ConsistentHash {
         let ring = self.ring.read().await;
         let mut nodes = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        
+
         for (_, node) in ring.iter() {
             if !seen.contains(node) {
                 nodes.push(node.clone());
                 seen.insert(node);
             }
         }
-        
+
         nodes
     }
 
@@ -70,4 +72,36 @@ impl ConsistentHash {
         t.hash(&mut hasher);
         hasher.finish()
     }
+}
+
+fn hash(key: &String) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub fn find_next_3_node(server_info: &Vec<ServerInfo>, key: &String) -> Vec<String> {
+    let h = hash(key);
+    let mut nodes = Vec::new();
+    for server in server_info {
+        if nodes.len() >= 3 {
+            break;
+        }
+        let server_hash = hash(&server.server_id);
+        if server_hash >= h {
+            nodes.push(server.address.clone());
+        }
+    }
+    if nodes.len() < 3 {
+        for server in server_info {
+            if nodes.len() >= 3 {
+                break;
+            }
+            let server_hash = hash(&server.server_id);
+            if server_hash < h {
+                nodes.push(server.address.clone());
+            }
+        }
+    }
+    nodes
 }
