@@ -1,0 +1,28 @@
+syntax = "proto3";
+package key_value_service;
+
+message KeyValue{
+    string key = 1;
+    string value = 2;
+};
+
+message Key {
+    string key = 1;
+};
+
+enum ResponseType{
+    success = 0;
+    key_not_exist = 1;
+};
+
+message Response{
+    KeyValue kv = 1;
+    ResponseType response_type = 2;
+};
+
+service KeyValueService {
+    rpc Create(KeyValue) returns (Response);
+    rpc Read(Key) returns (KeyValue);
+    rpc Update(KeyValue) returns (Response);
+    rpc Delete(Key) returns (Response);
+}

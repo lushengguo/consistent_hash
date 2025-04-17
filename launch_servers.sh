@@ -5,7 +5,7 @@ SERVERS=$(jq -r '.servers[]' setting.json)
 
 # Launch each server in the background
 for SERVER in $SERVERS; do
-  SERVER_ADDRESS=$SERVER cargo run --bin server &
+  cargo run --bin server "$SERVER" &
 done
 
 echo "All servers are running."

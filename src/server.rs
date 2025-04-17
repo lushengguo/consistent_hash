@@ -1,118 +1,186 @@
-use tokio::net::TcpListener;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use consistent_hash::consistent_hash::ConsistentHash;
-use consistent_hash::protocol::Protocol;
+use consistent_hash::protocol::{KvRequest, KvOp};
+use consistent_hash::pb::{
+    key_value_service_server::{KeyValueService, KeyValueServiceServer},
+    service_discovery_client::ServiceDiscoveryClient,
+    KeyValue, Key, Response, ResponseType, RegisterRequest, ServerInfo
+};
 use serde_json;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::fs::File;
-use std::io::Write;
+use tonic::{transport::Server, Request, Response as TonicResponse, Status};
+use std::env;
+use uuid::Uuid;
+use chrono::Utc;
 
-pub struct ServerState {
-    pub kv_store: Arc<RwLock<HashMap<String, String>>>,
-    pub hash_ring: Arc<ConsistentHash>,
+#[derive(Debug)]
+struct ServerState {
+    kv_store: RwLock<HashMap<String, String>>,
+    server_id: String,
+    address: String,
 }
 
-impl ServerState {
-    pub fn new(replicas: usize) -> Self {
-        Self {
-            kv_store: Arc::new(RwLock::new(HashMap::new())),
-            hash_ring: Arc::new(ConsistentHash::new(replicas)),
-        }
+#[derive(Debug)]
+struct KeyValueServiceImpl {
+    state: Arc<ServerState>,
+}
+
+#[tonic::async_trait]
+impl KeyValueService for KeyValueServiceImpl {
+    async fn create(
+        &self,
+        request: Request<KeyValue>,
+    ) -> Result<TonicResponse<Response>, Status> {
+        let kv = request.into_inner();
+        let mut store = self.state.kv_store.write().await;
+        
+        let already_exists = store.contains_key(&kv.key);
+        store.insert(kv.key.clone(), kv.value.clone());
+        
+        println!("创建键值对: {} = {}", kv.key, kv.value);
+        
+        Ok(TonicResponse::new(Response {
+            kv: Some(kv),
+            response_type: if already_exists { ResponseType::KeyNotExist as i32 } else { ResponseType::Success as i32 },
+        }))
     }
 
-    pub async fn add_node(&self, node: &str) {
-        self.hash_ring.add_node(node);
-        self.rebalance_data().await;
-    }
-
-    pub async fn remove_node(&self, node: &str) {
-        self.hash_ring.remove_node(node);
-        self.rebalance_data().await;
-    }
-
-    async fn rebalance_data(&self) {
-        let mut kv_store = self.kv_store.write().await;
-        let mut new_store = HashMap::new();
-
-        for (key, value) in kv_store.drain() {
-            if let Some(node) = self.hash_ring.get_node(&key) {
-                if node == "127.0.0.1:8080" {
-                    new_store.insert(key, value);
-                } else {
-                    // Simulate transferring data to the correct node
-                    println!("Transferring key {} to node {}", key, node);
-                }
+    async fn read(
+        &self,
+        request: Request<Key>,
+    ) -> Result<TonicResponse<KeyValue>, Status> {
+        let key = request.into_inner().key;
+        let store = self.state.kv_store.read().await;
+        
+        match store.get(&key) {
+            Some(value) => {
+                println!("读取键值对: {} = {}", key, value);
+                
+                Ok(TonicResponse::new(KeyValue {
+                    key,
+                    value: value.clone(),
+                }))
+            }
+            None => {
+                Err(Status::not_found(format!("Key not found: {}", key)))
             }
         }
+    }
 
-        *kv_store = new_store;
+    async fn update(
+        &self,
+        request: Request<KeyValue>,
+    ) -> Result<TonicResponse<Response>, Status> {
+        let kv = request.into_inner();
+        let mut store = self.state.kv_store.write().await;
+        
+        let existed = store.contains_key(&kv.key);
+        if existed {
+            store.insert(kv.key.clone(), kv.value.clone());
+            println!("更新键值对: {} = {}", kv.key, kv.value);
+            
+            Ok(TonicResponse::new(Response {
+                kv: Some(kv),
+                response_type: ResponseType::Success as i32,
+            }))
+        } else {
+            println!("更新失败，键不存在: {}", kv.key);
+            
+            Ok(TonicResponse::new(Response {
+                kv: Some(kv),
+                response_type: ResponseType::KeyNotExist as i32,
+            }))
+        }
+    }
+
+    async fn delete(
+        &self,
+        request: Request<Key>,
+    ) -> Result<TonicResponse<Response>, Status> {
+        let key = request.into_inner().key;
+        let mut store = self.state.kv_store.write().await;
+        
+        let removed = store.remove(&key);
+        
+        if removed.is_some() {
+            println!("删除键值对: {}", key);
+            
+            Ok(TonicResponse::new(Response {
+                kv: Some(KeyValue {
+                    key: key.clone(),
+                    value: "".to_string(),
+                }),
+                response_type: ResponseType::Success as i32,
+            }))
+        } else {
+            println!("删除失败，键不存在: {}", key);
+            
+            Ok(TonicResponse::new(Response {
+                kv: Some(KeyValue {
+                    key: key.clone(),
+                    value: "".to_string(),
+                }),
+                response_type: ResponseType::KeyNotExist as i32,
+            }))
+        }
     }
 }
 
-pub async fn log_data_distribution(server_state: Arc<ServerState>, log_file: &str) {
-    let kv_store = server_state.kv_store.read().await;
-    let mut file = File::create(log_file).unwrap();
-
-    writeln!(file, "Data Distribution:").unwrap();
-    for (key, value) in kv_store.iter() {
-        writeln!(file, "Key: {}, Value: {}", key, value).unwrap();
-    }
-}
-
-pub async fn log_data_migration(key: &str, from_node: &str, to_node: &str, log_file: &str) {
-    let mut file = File::options().append(true).open(log_file).unwrap();
-    writeln!(file, "Migrating Key: {} from {} to {}", key, from_node, to_node).unwrap();
+async fn register_with_proxy(
+    proxy_addr: &str,
+    server_id: &str,
+    server_addr: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = ServiceDiscoveryClient::connect(format!("http://{}", proxy_addr)).await?;
+    
+    let request = tonic::Request::new(RegisterRequest {
+        server: Some(ServerInfo {
+            server_id: server_id.to_string(),
+            address: server_addr.to_string(),
+            weight: 1,
+        }),
+    });
+    
+    let response = client.register(request).await?;
+    
+    println!("注册到代理: {:?}", response.into_inner());
+    
+    Ok(())
 }
 
 #[tokio::main]
-async fn main() {
-    let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
-    let server_state = Arc::new(ServerState::new(3));
-
-    println!("Server running on 127.0.0.1:8080");
-
-    loop {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let server_state = Arc::clone(&server_state);
-
-        tokio::spawn(async move {
-            let mut buffer = vec![0; 1024];
-            let n = socket.read(&mut buffer).await.unwrap();
-
-            if n == 0 {
-                return;
-            }
-
-            let request: Protocol = serde_json::from_slice(&buffer[..n]).unwrap();
-            let response = match server_state.hash_ring.get_node(&request.key) {
-                Some(node) => {
-                    if node == "127.0.0.1:8080" {
-                        let mut store = server_state.kv_store.write().await;
-                        store.insert(request.key.clone(), request.value.clone());
-                        Protocol {
-                            key: request.key,
-                            value: request.value,
-                            error: None,
-                        }
-                    } else {
-                        Protocol {
-                            key: request.key,
-                            value: String::new(),
-                            error: Some(format!("Key belongs to node: {}", node)),
-                        }
-                    }
-                }
-                None => Protocol {
-                    key: request.key,
-                    value: String::new(),
-                    error: Some("No nodes available".to_string()),
-                },
-            };
-
-            let response = serde_json::to_vec(&response).unwrap();
-            socket.write_all(&response).await.unwrap();
-        });
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 3 {
+        eprintln!("Usage: server <server_address> <proxy_address>");
+        eprintln!("Example: server 127.0.0.1:50052 127.0.0.1:50051");
+        return Ok(());
     }
+    
+    let server_addr = &args[1];
+    let proxy_addr = &args[2];
+    
+    let server_id = Uuid::new_v4().to_string();
+    
+    let state = Arc::new(ServerState {
+        kv_store: RwLock::new(HashMap::new()),
+        server_id: server_id.clone(),
+        address: server_addr.to_string(),
+    });
+
+    println!("服务器启动于: {}, ID: {}", server_addr, server_id);
+    
+    register_with_proxy(proxy_addr, &server_id, server_addr).await?;
+    
+    let service = KeyValueServiceImpl { state };
+    let addr: SocketAddr = server_addr.parse()?;
+    
+    Server::builder()
+        .add_service(KeyValueServiceServer::new(service))
+        .serve(addr)
+        .await?;
+    
+    Ok(())
 }
