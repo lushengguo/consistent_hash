@@ -1,10 +1,10 @@
 syntax = "proto3";
-package service_discovery;
+package consistent_hash;
 
 message ServerInfo {
     string server_id = 1;
-    string address = 2;  // 格式为 "IP:端口"
-    int32 weight = 3;    // 服务器权重，用于一致性哈希
+    string address = 2;  
+    int32 weight = 3;    
 }
 
 message ServerList {
@@ -30,7 +30,7 @@ message DeregisterResponse {
 }
 
 message GetServerRequest {
-    string key = 1;  // 要查找的键
+    string key = 1;  
 }
 
 message GetServerResponse {
@@ -40,15 +40,8 @@ message GetServerResponse {
 message GetAllServersRequest {}
 
 service ServiceDiscovery {
-    // 服务器注册到代理
     rpc Register(RegisterRequest) returns (RegisterResponse);
-    
-    // 服务器从代理注销
     rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
-    
-    // 获取负责特定键的服务器
     rpc GetServer(GetServerRequest) returns (GetServerResponse);
-    
-    // 获取所有注册的服务器
     rpc GetAllServers(GetAllServersRequest) returns (ServerList);
 }

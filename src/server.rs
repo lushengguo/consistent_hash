@@ -1,19 +1,19 @@
+use chrono::Utc;
 use consistent_hash::consistent_hash::ConsistentHash;
-use consistent_hash::protocol::{KvRequest, KvOp};
 use consistent_hash::pb::{
+    Key, KeyValue, RegisterRequest, Response, ResponseType, ServerInfo,
     key_value_service_server::{KeyValueService, KeyValueServiceServer},
     service_discovery_client::ServiceDiscoveryClient,
-    KeyValue, Key, Response, ResponseType, RegisterRequest, ServerInfo
 };
+use consistent_hash::protocol::{KvOp, KvRequest};
 use serde_json;
 use std::collections::HashMap;
+use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tonic::{transport::Server, Request, Response as TonicResponse, Status};
-use std::env;
+use tonic::{Request, Response as TonicResponse, Status, transport::Server};
 use uuid::Uuid;
-use chrono::Utc;
 
 #[derive(Debug)]
 struct ServerState {
@@ -29,65 +29,58 @@ struct KeyValueServiceImpl {
 
 #[tonic::async_trait]
 impl KeyValueService for KeyValueServiceImpl {
-    async fn create(
-        &self,
-        request: Request<KeyValue>,
-    ) -> Result<TonicResponse<Response>, Status> {
+    async fn create(&self, request: Request<KeyValue>) -> Result<TonicResponse<Response>, Status> {
         let kv = request.into_inner();
         let mut store = self.state.kv_store.write().await;
-        
+
         let already_exists = store.contains_key(&kv.key);
         store.insert(kv.key.clone(), kv.value.clone());
-        
+
         println!("创建键值对: {} = {}", kv.key, kv.value);
-        
+
         Ok(TonicResponse::new(Response {
             kv: Some(kv),
-            response_type: if already_exists { ResponseType::KeyNotExist as i32 } else { ResponseType::Success as i32 },
+            response_type: if already_exists {
+                ResponseType::KeyNotExist as i32
+            } else {
+                ResponseType::Success as i32
+            },
         }))
     }
 
-    async fn read(
-        &self,
-        request: Request<Key>,
-    ) -> Result<TonicResponse<KeyValue>, Status> {
+    async fn read(&self, request: Request<Key>) -> Result<TonicResponse<KeyValue>, Status> {
         let key = request.into_inner().key;
         let store = self.state.kv_store.read().await;
-        
+
         match store.get(&key) {
             Some(value) => {
                 println!("读取键值对: {} = {}", key, value);
-                
+
                 Ok(TonicResponse::new(KeyValue {
                     key,
                     value: value.clone(),
                 }))
             }
-            None => {
-                Err(Status::not_found(format!("Key not found: {}", key)))
-            }
+            None => Err(Status::not_found(format!("Key not found: {}", key))),
         }
     }
 
-    async fn update(
-        &self,
-        request: Request<KeyValue>,
-    ) -> Result<TonicResponse<Response>, Status> {
+    async fn update(&self, request: Request<KeyValue>) -> Result<TonicResponse<Response>, Status> {
         let kv = request.into_inner();
         let mut store = self.state.kv_store.write().await;
-        
+
         let existed = store.contains_key(&kv.key);
         if existed {
             store.insert(kv.key.clone(), kv.value.clone());
             println!("更新键值对: {} = {}", kv.key, kv.value);
-            
+
             Ok(TonicResponse::new(Response {
                 kv: Some(kv),
                 response_type: ResponseType::Success as i32,
             }))
         } else {
             println!("更新失败，键不存在: {}", kv.key);
-            
+
             Ok(TonicResponse::new(Response {
                 kv: Some(kv),
                 response_type: ResponseType::KeyNotExist as i32,
@@ -95,18 +88,15 @@ impl KeyValueService for KeyValueServiceImpl {
         }
     }
 
-    async fn delete(
-        &self,
-        request: Request<Key>,
-    ) -> Result<TonicResponse<Response>, Status> {
+    async fn delete(&self, request: Request<Key>) -> Result<TonicResponse<Response>, Status> {
         let key = request.into_inner().key;
         let mut store = self.state.kv_store.write().await;
-        
+
         let removed = store.remove(&key);
-        
+
         if removed.is_some() {
             println!("删除键值对: {}", key);
-            
+
             Ok(TonicResponse::new(Response {
                 kv: Some(KeyValue {
                     key: key.clone(),
@@ -116,7 +106,7 @@ impl KeyValueService for KeyValueServiceImpl {
             }))
         } else {
             println!("删除失败，键不存在: {}", key);
-            
+
             Ok(TonicResponse::new(Response {
                 kv: Some(KeyValue {
                     key: key.clone(),
@@ -134,7 +124,7 @@ async fn register_with_proxy(
     server_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = ServiceDiscoveryClient::connect(format!("http://{}", proxy_addr)).await?;
-    
+
     let request = tonic::Request::new(RegisterRequest {
         server: Some(ServerInfo {
             server_id: server_id.to_string(),
@@ -142,11 +132,11 @@ async fn register_with_proxy(
             weight: 1,
         }),
     });
-    
+
     let response = client.register(request).await?;
-    
+
     println!("注册到代理: {:?}", response.into_inner());
-    
+
     Ok(())
 }
 
@@ -158,12 +148,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Example: server 127.0.0.1:50052 127.0.0.1:50051");
         return Ok(());
     }
-    
+
     let server_addr = &args[1];
     let proxy_addr = &args[2];
-    
+
     let server_id = Uuid::new_v4().to_string();
-    
+
     let state = Arc::new(ServerState {
         kv_store: RwLock::new(HashMap::new()),
         server_id: server_id.clone(),
@@ -171,16 +161,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     println!("服务器启动于: {}, ID: {}", server_addr, server_id);
-    
+
     register_with_proxy(proxy_addr, &server_id, server_addr).await?;
-    
+
     let service = KeyValueServiceImpl { state };
     let addr: SocketAddr = server_addr.parse()?;
-    
+
     Server::builder()
         .add_service(KeyValueServiceServer::new(service))
         .serve(addr)
         .await?;
-    
+
     Ok(())
 }

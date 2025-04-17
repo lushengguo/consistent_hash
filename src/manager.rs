@@ -3,6 +3,7 @@ use consistent_hash::pb::{
     DeregisterRequest, DeregisterResponse, GetAllServersRequest, GetServerRequest,
     GetServerResponse, RegisterRequest, RegisterResponse, ServerInfo, ServerList,
     key_value_service_client::KeyValueServiceClient,
+    service_discovery_client::ServiceDiscoveryClient,
     service_discovery_server::{ServiceDiscovery, ServiceDiscoveryServer},
 };
 use std::collections::HashMap;

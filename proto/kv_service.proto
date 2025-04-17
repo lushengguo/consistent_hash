@@ -1,5 +1,5 @@
 syntax = "proto3";
-package key_value_service;
+package kv_service;
 
 message KeyValue{
     string key = 1;

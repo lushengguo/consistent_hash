@@ -27,5 +27,5 @@ name = "client"
 path = "src/client.rs"
 
 [[bin]]
-name = "proxy"
-path = "src/proxy.rs"
+name = "manager"
+path = "src/manager.rs"
